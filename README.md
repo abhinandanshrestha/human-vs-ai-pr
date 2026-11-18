@@ -1,6 +1,4 @@
 # AI-Agent vs Human PR Vulnerability Pipeline — Overview
----
-
 ## Table of Contents
 
 1. [The Research Question](#1-the-research-question)
