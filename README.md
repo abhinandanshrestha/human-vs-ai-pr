@@ -5,34 +5,53 @@
 1. [Quick Start](#1-quick-start)
 2. [The Research Question](#2-the-research-question)
 3. [Which Notebook Should I Use?](#3-which-notebook-should-i-use)
-4. [Background: What is AIDev?](#4-background-what-is-aidev)
-5. [Background: The Tools](#5-background-the-tools)
-6. [End-to-End Flowchart](#6-end-to-end-flowchart)
-7. [Step-by-Step Breakdown](#7-step-by-step-breakdown)
-8. [Data Artifacts Produced](#8-data-artifacts-produced)
-9. [Rate-Limit & Resilience Strategy](#9-rate-limit--resilience-strategy)
-10. [Why Each Design Choice Matters](#10-why-each-design-choice-matters)
-11. [Expected Outputs](#11-expected-outputs)
-12. [Caveats](#12-caveats)
+4. [The Complete Analysis Workflow](#4-the-complete-analysis-workflow)
+5. [Background: What is AIDev?](#5-background-what-is-aidev)
+6. [Background: The Tools](#6-background-the-tools)
+7. [End-to-End Flowchart](#7-end-to-end-flowchart)
+8. [Step-by-Step Breakdown](#8-step-by-step-breakdown)
+9. [Data Artifacts Produced](#9-data-artifacts-produced)
+10. [Rate-Limit & Resilience Strategy](#10-rate-limit--resilience-strategy)
+11. [Why Each Design Choice Matters](#11-why-each-design-choice-matters)
+12. [Expected Outputs](#12-expected-outputs)
+13. [Caveats](#13-caveats)
 
 ---
 
 ## 1. Quick Start
 
+The full analysis is **two notebooks run in sequence**:
+
 ```bash
 cd C:\Users\abhinandan.shrestha\Documents\Test\AIAgentVulnPipeline
 
-# 1. Create .env with your GitHub Personal Access Token (public_repo read scope)
+# 0. Create .env with your GitHub Personal Access Token (public_repo read scope)
 echo "GITHUB_TOKEN=ghp_your_actual_token" > .env
 
-# 2. Launch Jupyter and pick ONE notebook:
-jupyter notebook AI_Agent_Vuln_Pipeline_Fast.ipynb   # RECOMMENDED — parallelized, rate-limit safe
+# -------------------------------------------------------------------
+# Step A: MINE PR DATA (slow, ~10-15 hours for all 9,509 repos)
+# -------------------------------------------------------------------
+jupyter notebook AI_Agent_Vuln_Pipeline_Fast.ipynb
+# Cell -> Run All. Produces:
+#   data_fast/ai_manifest_touching_prs.csv        (AI-side PR metadata)
+#   data_fast/human_manifest_touching_prs.csv     (matched human PRs)
 
-# 3. Cell -> Run All
-# 4. Inspect data_fast/final_analysis_dataset.csv when done
+# -------------------------------------------------------------------
+# Step B: SCAN + COMPARE (~2 hours for 1000 AI + 1000 Human sample)
+# -------------------------------------------------------------------
+jupyter notebook Scan_And_Compare.ipynb
+# Cell -> Run All. Produces:
+#   data_scan/final_scan_dataset.csv              (PRs + OSV + Semgrep scan results)
+#   data_scan/comparison_reports/*.csv            (DuckDB SQL comparison tables)
+#   + prints final verdict with chi-square / Fisher / odds-ratio
 ```
 
-**Runtime estimate for the Fast notebook on all 9,509 repos**: 10-15 hours wall-clock (resumable).
+| Stage | Runtime | Output |
+|---|---|---|
+| **A. Mining** (Fast notebook, 9,509 repos) | 10-15 hours | 2 intermediate CSVs with PR metadata |
+| **B. Scan + Compare** (1000 AI + 1000 Human, matched) | ~2 hours | Final dataset + statistical verdict |
+
+Both notebooks are **fully resumable** — safe to interrupt and restart.
 
 ---
 
@@ -45,13 +64,15 @@ This matters because:
 - They're often rubber-stamped by reviewers who trust the agent's output
 - If they introduce vulnerabilities at a higher rate, we need to know
 
-The paper's answer: **AI-agent PRs introduce vulnerabilities at ~2× the odds of human PRs** (17.17% vs. 9.14%), and the ones they introduce skew **more severe** (36.8% critical vs. 20.5% for humans).
+**Expected outcome of our finding** (if the paper's effect replicates on our sample): AI-agent PRs should introduce vulnerabilities at **~2× the odds of human PRs**, and the ones they introduce should skew **more severe** (CRITICAL/HIGH proportionally higher for AI than for humans). Our run may land anywhere inside a wider confidence interval because we use a 2,000-PR matched sample plus Semgrep in addition to OSV.
 
 ---
 
 ## 3. Which Notebook Should I Use?
 
-There are **two notebooks** in this folder. Pick based on scope and time budget:
+There are **four notebooks** in this folder, falling into two groups:
+
+### Group A — Mining (produces PR metadata CSVs)
 
 | Feature | `AI_Agent_Vuln_Pipeline.ipynb` (original) | `AI_Agent_Vuln_Pipeline_Fast.ipynb` ⚡ (recommended) |
 |---|---|---|
@@ -65,11 +86,119 @@ There are **two notebooks** in this folder. Pick based on scope and time budget:
 | **Fast-path reuse** | No | **Yes** — reuses `ai_manifest_touching_prs.csv` and `osv-scanner.exe` from `data/` if present |
 | **Full-scope runtime** | 10+ hours (slow single-thread) | **10-15 hours** (dominated by rate limits, not code) |
 
-**Default choice**: use the Fast notebook. The original is kept as the canonical reference implementation.
+### Group B — Scanning + Comparison (produces vuln findings + verdict)
+
+| Notebook | Purpose | Reads | Writes |
+|---|---|---|---|
+| **`Scan_And_Compare.ipynb`** ⭐ | **End-to-end scan + compare.** Samples 1000 AI + 1000 Human PRs from matched top-1000 repos, runs OSV + Semgrep, computes verdict via DuckDB SQL. | `data_fast/*_manifest_touching_prs.csv` | `data_scan/final_scan_dataset.csv`<br>`data_scan/comparison_reports/*.csv` |
+| `Comparison_Analysis.ipynb` | **Comparison-only.** Reads whichever `final_analysis_dataset.csv` already exists (from the original slow notebook). Does not perform any scanning. | `data/final_analysis_dataset.csv` or `data_fast/final_analysis_dataset.csv` | `comparison_reports/*.csv` |
+
+**Recommended workflow**:
+1. **`AI_Agent_Vuln_Pipeline_Fast.ipynb`** → mine PR metadata (one time, ~10-15h)
+2. **`Scan_And_Compare.ipynb`** → sample + scan + compare (~2h) → **get your verdict**
+
+The original slow notebook is kept as the canonical reference implementation; `Comparison_Analysis.ipynb` is for anyone who ran the original slow notebook and wants a pure-SQL comparison layer on top of its output.
 
 ---
 
-## 4. Background: What is AIDev?
+## 4. The Complete Analysis Workflow
+
+The whole pipeline is a **two-stage flow**. The split exists because mining (Stage A) is slow and quota-bound while scanning + comparison (Stage B) is CPU-bound — keeping them separate means you can re-run Stage B many times without re-mining.
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│ STAGE A — MINE (AI_Agent_Vuln_Pipeline_Fast.ipynb)                   │
+│                                                                      │
+│ AIDev parquets → classify ecosystems → rank 9509 repos by AI PR count│
+│         ↓                                                            │
+│ For each repo in priority order (8 parallel workers):                │
+│   GraphQL paginate merged PRs → filter bots → intersect manifests    │
+│         ↓                                                            │
+│ APPEND to CSV per repo (rate-limit-safe, resumable)                  │
+│         ↓                                                            │
+│ ARTIFACTS:                                                           │
+│   • data_fast/ai_manifest_touching_prs.csv    (~360K rows)           │
+│   • data_fast/human_manifest_touching_prs.csv (~1M+ rows)            │
+└──────────────────────────────────────────────────────────────────────┘
+                                 ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│ STAGE B — SCAN + COMPARE (Scan_And_Compare.ipynb)                    │
+│                                                                      │
+│ Sample: rank repos → keep top 1000 (must have both AI + Human PRs)   │
+│         → pick 1 most-recent AI PR + 1 most-recent Human PR per repo │
+│         → ~1000 AI + ~1000 Human PRs, matched by repo                │
+│         ↓                                                            │
+│ Fetch commit SHAs (base / head / merge), batched 50/call             │
+│         ↓                                                            │
+│ For each PR:                                                         │
+│   OSV:     fetch lockfile content BEFORE + AFTER → osv-scanner scan  │
+│            → introduced = after_vulns − before_vulns                 │
+│   Semgrep: fetch PR source files → scan both versions                │
+│            → introduced findings = after − before                    │
+│         ↓                                                            │
+│ Merge OSV + Semgrep results on pr_id → final_scan_dataset.csv        │
+│         ↓                                                            │
+│ DuckDB SQL analysis:                                                 │
+│   • AI vs Human introduction rate (both scanners, side-by-side)      │
+│   • Per-ecosystem pivot (python/typescript/go/csharp)                │
+│   • Per-agent breakdown (Copilot/Devin/Cursor/Codex/Claude)          │
+│   • Severity distribution (CRITICAL/HIGH/MODERATE/LOW)               │
+│   • Scanner agreement (OSV ∩ Semgrep on same PRs)                    │
+│         ↓                                                            │
+│ Statistical tests: chi-square + Fisher's exact + odds ratio + 95% CI │
+│         ↓                                                            │
+│ FINAL VERDICT printed to notebook + saved as CSVs:                   │
+│   • data_scan/comparison_reports/osv_side_summary.csv                │
+│   • data_scan/comparison_reports/semgrep_side_summary.csv            │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### Why two stages instead of one monolithic notebook?
+
+- **Mining takes 10-15 hours** and is dominated by GitHub rate limits — you want it to run once, overnight, and never again
+- **Scanning takes ~2 hours** and you may want to **rerun it with different sampling parameters** (bigger sample, different repo ranking, different scanners)
+- Keeping them separate means you can **tune the comparison without re-mining**
+- The intermediate CSVs are small enough to version in git if you want to share
+
+### What you actually see at the end of Stage B
+
+After running `Scan_And_Compare.ipynb`, the final cells print:
+
+```
+======================================================================
+RESEARCH QUESTION — FINAL VERDICT
+======================================================================
+
+Q: Do AI-authored PRs introduce vulnerabilities at a different rate
+   than human-authored PRs in the SAME repositories?
+
+OSV-SCANNER (dependency vulnerabilities):
+   AI PRs:    XX.XX% introduction rate
+   Human PRs: YY.YY% introduction rate
+   AI is Z.ZZx MORE likely (OR)
+   95% CI: [...]
+   p = X.XXe-XX (statistically significant)
+
+SEMGREP (source-code patterns):
+   AI PRs:    XX.XX% introduction rate
+   Human PRs: YY.YY% introduction rate
+   AI is Y.YYx MORE likely (OR)
+   ...
+
+----------------------------------------------------------------------
+PAPER REFERENCE (for comparison):
+   AI OSV rate:    17.17% vs Human 9.14%
+   Odds ratio:     2.06 [95% CI 1.76 - 2.41], p = 3.8e-17
+   (Paper used OSV only; no Semgrep.)
+
+CONCLUSION: Both scanners agree → AI introduces MORE vulnerabilities than Human.
+```
+
+Plus intermediate tables for per-ecosystem, per-agent, severity breakdown, and scanner agreement.
+
+---
+
+## 5. Background: What is AIDev?
 
 **AIDev** (and its curated subset **AIDev-Pop**) is a research dataset published on HuggingFace by **Hao Li et al.** at [`hao-li/AIDev`](https://huggingface.co/datasets/hao-li/AIDev).
 
@@ -132,9 +261,9 @@ AIDev is a **published**, **versioned**, **openly-downloadable** dataset — and
 
 ---
 
-## 5. Background: The Tools
+## 6. Background: The Tools
 
-### 5.1 OSV-Scanner
+### 6.1 OSV-Scanner
 
 - **What it is**: Google's open-source vulnerability scanner
 - **What it does**: Reads a dependency lockfile (e.g. `package-lock.json`), resolves every package version, and queries [OSV.dev](https://osv.dev) — an aggregated database of known vulnerabilities covering CVEs, GHSAs, GSD, RustSec, etc.
@@ -142,13 +271,16 @@ AIDev is a **published**, **versioned**, **openly-downloadable** dataset — and
 - **Why it matters**: It scans **declared dependencies**, so it finds supply-chain risks — the kind introduced when an AI agent bumps `lodash` to a version with a known prototype-pollution bug
 - **What it can't do**: It doesn't look at source code. A SQL injection the author wrote by hand in `app.py` is invisible to OSV
 
-### 5.2 Semgrep (original notebook only)
+### 6.2 Semgrep
 
 - **What it is**: A static-analysis tool that pattern-matches **source code** against vulnerability rules
 - **What it does**: Runs a ruleset (`--config auto`) over `.py`, `.js`, `.ts`, `.go`, `.java`, etc. — flagging hardcoded secrets, SQL injection, insecure deserialization, XSS patterns, weak cryptography
-- **Status**: **Skipped in the Fast notebook**. The paper doesn't use Semgrep, and it was the single slowest step. If you want Semgrep findings back, run them selectively on the subset of PRs that OSV already flagged.
+- **Status by notebook**:
+  - `AI_Agent_Vuln_Pipeline.ipynb` (original slow) — runs Semgrep end-to-end on all PRs
+  - `AI_Agent_Vuln_Pipeline_Fast.ipynb` — **skipped** (would dominate runtime for the full 9,509-repo mining pass)
+  - `Scan_And_Compare.ipynb` — **runs Semgrep on the 2000-PR sample** (OSV + Semgrep side by side)
 
-### 5.3 GitHub GraphQL API
+### 6.3 GitHub GraphQL API
 
 - Used for **90% of data fetching** in this pipeline
 - Reasons we prefer it over REST:
@@ -160,7 +292,7 @@ AIDev is a **published**, **versioned**, **openly-downloadable** dataset — and
 
 ---
 
-## 6. End-to-End Flowchart
+## 7. End-to-End Flowchart
 
 ```mermaid
 flowchart TD
@@ -196,7 +328,7 @@ flowchart TD
 
 ---
 
-## 7. Step-by-Step Breakdown
+## 8. Step-by-Step Breakdown
 
 ### Step 1 — Imports and workspace paths
 - Standard library + `pandas`, `requests`, `threading`, `concurrent.futures`
@@ -331,28 +463,54 @@ Prints side breakdown (AI vs Human counts), per-agent breakdown, and intro-vuln 
 
 ---
 
-## 8. Data Artifacts Produced
+## 9. Data Artifacts Produced
 
-Every file lives in `data_fast/` (or `data/` for the original notebook):
+Artifacts live in three folders, one per notebook family:
 
-| Filename | Produced by | Write mode | Purpose |
-|---|---|---|---|
-| `ai_manifest_touching_prs.csv` | Step 5 | overwrite (or **reused**) | AI side raw (49 MB) |
-| `human_manifest_touching_prs.csv` | Step 7 | **append** (one block per repo) | Human side raw |
-| `human_mining_done_repos.txt` | Step 7 | **append** (one line per repo) | Resume checkpoint |
-| `ai_pr_numbers.csv` | Step 9 | overwrite | AI PR number lookup |
-| `all_pr_shas.csv` | Step 10 | overwrite | Commit SHAs for both sides |
-| `osv_scan_results.csv` | Step 12 | overwrite every 25 PRs | Dependency vulns per PR |
-| `osv_scan_done_ids.txt` | Step 12 | overwrite | Resume checkpoint |
-| `review_metadata.csv` | Step 14 | overwrite per batch | Review/merge metadata |
-| **`final_analysis_dataset.csv`** | Step 15 | overwrite | **THE OUTPUT** |
-| `osv-scanner.exe` | Step 1-2 | downloaded / reused | OSV binary (57 MB) |
-| `mining_failures.log` | Step 7 | append | Repos that failed GraphQL |
-| `osv_scan_failures.log` | Step 12 | append | PRs OSV couldn't scan |
+### `data/` — original slow notebook
+
+| Filename | Write mode | Purpose |
+|---|---|---|
+| `ai_manifest_touching_prs.csv` | overwrite | AI side raw (~49 MB) |
+| `human_manifest_touching_prs.csv` | **append** (one block per repo) | Human side raw |
+| `human_mining_done_repos.txt` | **append** | Resume checkpoint |
+| `ai_pr_numbers.csv` | overwrite | AI PR number lookup |
+| `all_pr_shas.csv` | overwrite | Commit SHAs for both sides |
+| `osv_scan_results.csv` | overwrite every 25 PRs | Dependency vulns per PR |
+| `semgrep_scan_results.csv` | overwrite every 10 PRs | Code-pattern vulns per PR |
+| `review_metadata.csv` | overwrite per batch | Review/merge metadata |
+| **`final_analysis_dataset.csv`** | overwrite | **FINAL OUTPUT (OSV + Semgrep)** |
+| `osv-scanner.exe` | downloaded | OSV binary (57 MB) |
+
+### `data_fast/` — Fast notebook (Stage A: mining only)
+
+| Filename | Write mode | Purpose |
+|---|---|---|
+| `ai_manifest_touching_prs.csv` | overwrite (or **reused** from `data/`) | AI side raw (~49 MB) |
+| **`human_manifest_touching_prs.csv`** | **append** (thread-safe) | **Primary Stage-A output** |
+| `human_mining_done_repos.txt` | **append** | Resume checkpoint |
+| `mining_failures.log` | append | Repos that failed GraphQL |
+| `osv-scanner.exe` | downloaded / reused | OSV binary (57 MB) |
+
+### `data_scan/` — Scan_And_Compare notebook (Stage B: scan + verdict)
+
+| Filename | Write mode | Purpose |
+|---|---|---|
+| `sampled_prs.csv` | overwrite | 2000 PR sample (1 AI + 1 Human per top-1000 repo) |
+| `ai_pr_numbers.csv` | overwrite | AI PR number lookup (sample only) |
+| `sample_pr_shas.csv` | overwrite per batch | Commit SHAs |
+| `sample_pr_source_files.csv` | overwrite per 50 PRs | PR source file list for Semgrep |
+| `osv_scan_results.csv` | overwrite every 25 PRs | OSV findings per PR |
+| `osv_scan_done_ids.txt` | overwrite | Resume checkpoint |
+| `semgrep_scan_results.csv` | overwrite every 10 PRs | Semgrep findings per PR |
+| `semgrep_scan_done_ids.txt` | overwrite | Resume checkpoint |
+| **`final_scan_dataset.csv`** | overwrite | **FINAL OUTPUT (OSV + Semgrep merged)** |
+| `comparison_reports/*.csv` | overwrite | Per-table DuckDB SQL outputs |
+| `failures.log` | append | Failed fetches / scans |
 
 ---
 
-## 9. Rate-Limit & Resilience Strategy
+## 10. Rate-Limit & Resilience Strategy
 
 The Fast notebook is designed for a **10-15 hour unsupervised run** against GitHub. Every layer of rate-limit protection stacks:
 
@@ -397,7 +555,7 @@ The checkpoint files make the whole thing idempotent:
 
 ---
 
-## 10. Why Each Design Choice Matters
+## 11. Why Each Design Choice Matters
 
 ### Why **rank repos by AI PR count** and process from most → least important?
 Repos with 1-2 AI PRs cost the same GraphQL quota to mine as repos with hundreds, but contribute almost no statistical signal. Ranking them first means:
@@ -439,43 +597,83 @@ Every operation is inline so you can read each cell top-to-bottom, pause mid-loo
 
 ---
 
-## 11. Expected Outputs
+## 12. Expected Outputs
 
-### Final CSV structure
+### A. After Stage A (mining) — `data_fast/`
+
+| File | Rows | Purpose |
+|---|---|---|
+| `ai_manifest_touching_prs.csv` | ~360,000 (57,976 unique PRs) | AI-side manifest-touching events |
+| `human_manifest_touching_prs.csv` | ~1,000,000+ (depends on repos mined) | Matched human PRs in same repos |
+| `human_mining_done_repos.txt` | 9,509 lines | Resume checkpoint |
+
+### B. After Stage B (scan + compare) — `data_scan/`
+
+| File | Content |
+|---|---|
+| `sampled_prs.csv` | 2000 sampled PRs (1 AI + 1 Human per top-1000 repo) |
+| `sample_pr_shas.csv` | Base / head / merge SHAs per PR |
+| `osv_scan_results.csv` | OSV findings per PR (before/after/introduced/fixed counts + severities) |
+| `semgrep_scan_results.csv` | Semgrep findings per PR |
+| **`final_scan_dataset.csv`** | **Merged dataset with both scanners** — the analysis input |
+| `comparison_reports/osv_side_summary.csv` | AI vs Human OSV rates |
+| `comparison_reports/semgrep_side_summary.csv` | AI vs Human Semgrep rates |
+
+### Final `final_scan_dataset.csv` structure
 ```
-pr_id      side   agent   full_name         ecosystems   introduced_count  review_count  hours_to_merge
-123456     ai     devin   openclaw/openclaw python       2                 3             16.4
-123457     human  human   openclaw/openclaw python       0                 1             4.2
-123458     ai     copilot github/gh-aw      typescript   0                 5             28.9
-...
+pr_id  side  agent         full_name              ecosystems  introduced_count  sg_introduced_count  ...
+X      ai    Copilot       openclaw/openclaw      python      2                 1                    ...
+Y      human human         openclaw/openclaw      python      0                 0                    ...
+Z      ai    Claude_Code   github/gh-aw           typescript  0                 3                    ...
 ```
 
-### Approximate sizes
+### What prints at the end of Stage B (final verdict)
 
-| Scope | Repos | AI PRs | Human PRs (est.) | Step 7 runtime |
-|---|---|---|---|---|
-| Top 500 | 500 | ~29,000 | ~8,000-15,000 | ~30-60 min (slow NB) / ~5-10 min (Fast NB) |
-| **Full 9,509** | **9,509** | **~58,000** | **~16,000+** | **~10-15 hours (Fast NB)** |
+```
+OSV-SCANNER (dependency vulnerabilities):
+   AI PRs:    XX.XX% introduction rate
+   Human PRs: YY.YY% introduction rate
+   AI is Z.ZZx MORE likely (OR)
+   95% CI: [...]
+   p = X.XXe-XX (statistically significant)
 
-### Headline statistics the paper reports (full-scope reference)
-- Pooled AI intro rate: **17.17%**
-- Pooled human intro rate: **9.14%**
+SEMGREP (source-code patterns):
+   AI PRs:    XX.XX% introduction rate
+   Human PRs: YY.YY% introduction rate
+   AI is Y.YYx MORE likely (OR)
+   ...
+
+CONCLUSION: Both scanners agree → AI introduces MORE vulnerabilities than Human.
+```
+
+### Approximate sample sizes
+
+| Stage | Scope | Rows | Runtime |
+|---|---|---|---|
+| A — mining (Fast notebook) | All 9,509 repos, top-ranked first | ~360K AI + ~1M Human metadata rows | 10-15 hours |
+| B — scan (Scan_And_Compare) | 1000 repos × (1 AI + 1 Human) = 2000 PRs | ~2000 OSV + ~2000 Semgrep scan rows | ~2 hours |
+
+### Paper's reference statistics (for comparison)
+
+- Pooled AI intro rate: **17.17%** (OSV only)
+- Pooled human intro rate: **9.14%** (OSV only)
 - Pooled OR (AI vs human): **2.06** [95% CI 1.76-2.41], p = 3.8×10⁻¹⁷
 - Python ecosystem: AI 23.33% vs Human 8.34%, OR 3.34
 - TypeScript: AI 17.79% vs Human 9.60%, OR 2.04
 - Severity: 36.8% of AI-introduced vulns are CRITICAL vs 20.5% for human
 - AI PRs receive **more** reviews and **take longer** to merge — the gap persists despite scrutiny
 
-Direction should replicate but confidence intervals will be **wider** than the paper's because our time window is a snapshot of AIDev as of today, not the exact window Li et al. published.
+Direction should replicate; confidence intervals will be **wider** than the paper's because our sample is smaller (2000 vs ~17,700 PRs) and our time window is a snapshot of AIDev as of today, not the exact window Li et al. published.
 
 ---
 
-## 12. Caveats
+## 13. Caveats
 
 - **Observational, not causal**: AI vs. human assignment is not randomized. We report associations.
 - **C# excluded from vulnerability analysis**: OSV needs pinned lockfiles. NuGet's `packages.lock.json` is opt-in and rare — only ~3% of C# PRs are scannable. C# rows are retained in the raw dataset for transparency.
 - **Go stratum underpowered**: ~4 positive AI cases. Reported as inconclusive, not reversed.
-- **Semgrep ruleset variance**: `--config auto` pulls community rules whose set changes over time. Not a problem for *relative* AI vs. human comparison (both scanned the same way). Only in the original notebook — Fast notebook skips Semgrep entirely.
+- **Semgrep ruleset variance**: `--config auto` pulls community rules whose set changes over time. Not a problem for *relative* AI vs. human comparison (both scanned the same way). Semgrep runs in the original slow notebook and in `Scan_And_Compare.ipynb`; it is skipped in `AI_Agent_Vuln_Pipeline_Fast.ipynb` for runtime reasons.
+- **Sample size trade-off** (Scan_And_Compare only): we sample 1 AI + 1 Human PR per repo rather than scanning all PRs. This gives a matched design with fast runtime but reduces statistical power compared to the paper's full sample.
 - **Present-day vulnerability status**: We measure vulnerabilities as *currently known*, not *as of the PR's merge date*. This measures realized risk exposure — a design choice stated explicitly.
 
 ---
