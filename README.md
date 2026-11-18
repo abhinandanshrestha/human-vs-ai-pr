@@ -1,8 +1,4 @@
 # AI-Agent vs Human PR Vulnerability Pipeline — Overview
-
-> **What this notebook does, what every tool/dataset is, and why each step exists.**
-> Based on the research design from [ahmadmustafa02/ai-agent-dependency-vulns](https://github.com/ahmadmustafa02/ai-agent-dependency-vulns) (IEEE Access, 2026).
-
 ---
 
 ## Table of Contents
