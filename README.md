@@ -1,9 +1,5 @@
 # AI-Agent vs Human PR Dependency Vulnerability Pipeline
 
-> **Replica of** [ahmadmustafa02/ai-agent-dependency-vulns](https://github.com/ahmadmustafa02/ai-agent-dependency-vulns) (IEEE Access, 2026), rewritten as a step-by-step Jupyter notebook with no helper functions — every operation is inline so you can read, pause, inspect, and resume at any cell.
-
----
-
 ## Table of Contents
 
 1. [Quick Start](#1-quick-start)
